@@ -75,8 +75,8 @@ export class Runtime {
     const job: Job = { job_id: `job_${randomUUID()}`, workspace_id: workspace.id, root: workspace.root,
       command, cwd: resolved.relPath, pid: null, status: "running", started_at: new Date().toISOString(),
       finished_at: null, exit_code: null, owner: this.owner };
-    const out = fs.openSync(this.jobPath(job.job_id, "stdout.log"), "a", 0o600);
-    const err = fs.openSync(this.jobPath(job.job_id, "stderr.log"), "a", 0o600);
+    const out = fs.openSync(this.jobPath(job.job_id, "stdout.log"), "w", 0o600);
+    const err = fs.openSync(this.jobPath(job.job_id, "stderr.log"), "w", 0o600);
     let child: ChildProcess;
     try {
       child = spawn(bashExecutable(), ["-lc", command], { cwd: resolved.absPath, env: makeRestrictedBashEnv(this.config),

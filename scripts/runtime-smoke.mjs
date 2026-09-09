@@ -151,6 +151,11 @@ assert.equal((await until(() => racing.getJob(workspace, requested.job_id), job 
 
 try {
   await boot(); await connect();
+  const builtin = await call('start_job', { command: "printf 'builtin stdout\\n'; printf 'builtin stderr\\n' >&2" });
+  const builtinDone = await until(() => call('get_job', { job_id: builtin.job_id }), j => j.status !== 'running');
+  assert.equal(builtinDone.status, 'completed'); assert.equal(builtinDone.exit_code, 0);
+  assert.equal((await call('job_logs', { job_id: builtin.job_id })).text, 'builtin stdout\n');
+  assert.equal((await call('job_logs', { job_id: builtin.job_id, stream: 'stderr' })).text, 'builtin stderr\n');
   const started = Date.now(); const job = await call('start_job', { command: 'npm run check' });
   assert.equal(job.status, 'running'); assert.ok(Date.now() - started < 1400, 'start_job must return before check finishes');
   assert.equal((await call('get_job', { job_id: job.job_id })).job_id, job.job_id);
