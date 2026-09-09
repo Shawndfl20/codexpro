@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -65,6 +66,8 @@ for (const overrides of [{toolMode:'minimal'},{bashMode:'off'},{writeMode:'off'}
 
 const freePort = await new Promise(resolve => { const socket = net.createServer(); socket.listen(0, '127.0.0.1', () => { const port = socket.address().port; socket.close(() => resolve(port)); }); });
 env.CODEXPRO_PORT = String(freePort);
+env.CODEXPRO_REQUIRE_BASH_SESSION = '1';
+env.CODEXPRO_BASH_SESSION_ID = 'runtime-smoke';
 const base = `http://127.0.0.1:${freePort}`;
 const headers = { Authorization: `Bearer ${env.CODEXPRO_HTTP_TOKEN}` };
 let child, client;
@@ -80,13 +83,72 @@ async function connect() {
   await client.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'), { requestInit: { headers } }));
 }
 async function call(name, args = {}) {
-  const result = await client.callTool({ name, arguments: args });
+  const execution = ['start_job', 'open_shell', 'shell_exec', 'cancel_job', 'close_shell'].includes(name);
+  const result = await client.callTool({ name, arguments: { ...(execution ? { session_id: env.CODEXPRO_BASH_SESSION_ID } : {}), ...args } });
   assert.ok(!result.isError, JSON.stringify(result)); return result.structuredContent;
 }
 async function stop() {
   await client?.close(); client = null;
   const exited = new Promise(resolve => child.once('exit', resolve)); child.kill(); await exited;
 }
+// Closed history must not retain the live ChildProcess or its output/listeners.
+const recycled = new Runtime(config);
+let firstClosed;
+for (let index=0;index<35;index++) {
+  const opened = recycled.openShell(workspace);
+  firstClosed ??= opened.shell_id;
+  const live = recycled.shells.get(opened.shell_id);
+  await once(live.child, 'spawn');
+  if (index === 34) {
+    recycled.execShell(workspace, opened.shell_id, "printf '%6000s' x");
+    await until(() => recycled.readShell(workspace, opened.shell_id), shell => shell.status === 'idle');
+  }
+  const closed = once(live.child, 'close');
+  recycled.closeShell(workspace, opened.shell_id);
+  await closed;
+  assert.equal(recycled.shells.size, 0);
+  assert.equal(live.child.stdout.listenerCount('data'), 0);
+  assert.equal(live.child.stderr.listenerCount('data'), 0);
+  assert.equal(live.child.listenerCount('error'), 0);
+  assert.equal(live.pending, ''); assert.equal(live.stdout, ''); assert.equal(live.stderr, '');
+  const summary = recycled.readShell(workspace, opened.shell_id);
+  assert.equal(summary.status, 'closed'); assert.ok(summary.closed_at);
+  assert.ok(summary.stdout.length <= 4000 && summary.stderr.length <= 4000);
+}
+assert.equal(recycled.listShells(workspace).length, 32);
+assert.throws(() => recycled.readShell(workspace, firstClosed), /Unknown shell/);
+const natural = recycled.openShell(workspace);
+recycled.execShell(workspace, natural.shell_id, 'exit 3');
+assert.equal((await until(() => recycled.readShell(workspace, natural.shell_id), shell => shell.closed_at)).exit_code, 3);
+const failedShell = recycled.openShell(workspace, 'missing-directory');
+await until(() => recycled.readShell(workspace, failedShell.shell_id), shell => shell.closed_at);
+assert.equal(recycled.shells.size, 0);
+assert.equal(recycled.listShells(workspace).length, 32);
+
+// Cancel from the actual exit callback, before close finalizes persisted metadata.
+const racing = new Runtime(config);
+for (const code of [0, 7]) {
+  const job = await racing.startJob(workspace, `exit ${code}`);
+  const owned = racing.children.get(job.job_id);
+  owned.child.ref();
+  await new Promise((resolve, reject) => owned.child.once('exit', () => {
+    try {
+      const result = racing.cancelJob(workspace, job.job_id);
+      assert.equal(result.cancel_requested, undefined);
+      assert.equal(result.finished_at, null);
+      resolve();
+    } catch(error) { reject(error); }
+  }));
+  const result = await until(() => racing.getJob(workspace, job.job_id), job => job.status !== 'running');
+  assert.equal(result.status, code === 0 ? 'completed' : 'failed'); assert.equal(result.exit_code, code);
+}
+await fs.writeFile(path.join(root, 'cancel.cjs'), "require('node:fs').writeSync(1, 'ready'); setTimeout(() => {}, 20000);");
+const requested = await racing.startJob(workspace, 'node cancel.cjs');
+await until(() => racing.jobLogs(workspace, requested.job_id).text, text => text.includes('ready'));
+const cancelling = racing.cancelJob(workspace, requested.job_id);
+assert.equal(cancelling.status, 'running'); assert.equal(cancelling.cancel_requested, true, JSON.stringify({cancelling,stderr:racing.jobLogs(workspace,requested.job_id,'stderr').text})); assert.equal(cancelling.finished_at, null);
+assert.equal((await until(() => racing.getJob(workspace, requested.job_id), job => job.status !== 'running')).status, 'cancelled');
+
 try {
   await boot(); await connect();
   const started = Date.now(); const job = await call('start_job', { command: 'npm run check' });
@@ -111,7 +173,7 @@ try {
   assert.match(environment.stdout, /local-venv \.:/);
   const shellResult = await exec('printf "%s %s" "$PWD" "$RUNTIME_VALUE"');
   assert.equal(shellResult.pid, shell.pid); assert.equal(shellResult.cwd, 'src'); assert.match(shellResult.stdout, /src persisted/);
-  const escape = await client.callTool({ name: 'shell_exec', arguments: { shell_id: shell.shell_id, command: 'cd ../..' } }); assert.equal(escape.isError, true);
+  const escape = await client.callTool({ name: 'shell_exec', arguments: { shell_id: shell.shell_id, command: 'cd ../..', session_id: env.CODEXPRO_BASH_SESSION_ID } }); assert.equal(escape.isError, true);
   const task = await call('create_task', { title: 'Fix onboarding navigation', goal: 'Restore navigation and verify it', plan: 'Change navigation, then run checks.' });
   await fs.writeFile(path.join(root, 'src', 'navigation.txt'), 'updated navigation');
   await fs.mkdir(path.join(root, '.ai-bridge'), { recursive: true });
@@ -130,11 +192,27 @@ try {
   assert.equal((await fetch(base+'/runtime/state', { headers: { ...headers, Origin: 'https://evil.example' } })).status, 403);
   assert.equal((await fetch(base+'/runtime/state', { headers: { ...headers, 'X-Forwarded-For': '8.8.8.8' } })).status, 403);
   const running = await call('start_job', { command: 'sleep 20' });
-  const state = await (await fetch(base+'/runtime/state', { headers })).json();
+  const schemas = (await client.listTools()).tools;
+  for (const [name, id] of [['cancel_job', {job_id:running.job_id}], ['close_shell', {shell_id:shell.shell_id}]]) {
+    assert.ok(schemas.find(tool => tool.name === name).inputSchema.properties.session_id);
+    for (const session of [{}, {session_id:'wrong'}]) {
+      const rejected = await client.callTool({name, arguments:{...id,...session}});
+      assert.equal(rejected.isError, true); assert.match(JSON.stringify(rejected), /session id (is required|mismatch)/);
+    }
+  }
+  assert.equal((await call('get_job', {job_id:running.job_id})).status, 'running');
+  assert.equal((await call('shell_read', {shell_id:shell.shell_id})).status, 'idle');
+  const light = await (await fetch(base+'/runtime/state', {headers})).json();
+  assert.ok(light.jobs && light.persistent_shells);
+  for (const field of ['tasks','active_task','instructions','git_status','diff_summary','handoff']) assert.ok(!(field in light));
+  const state = await (await fetch(base+'/runtime/state?include_context=1', { headers })).json();
   assert.equal(state.active_task.task_id, task.task_id); assert.ok(state.running_jobs.some(j => j.job_id === running.job_id)); assert.equal(state.persistent_shells[0].shell_id, shell.shell_id);
   const cancel = await fetch(base+'/runtime/action', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', Origin: base }, body: JSON.stringify({ action: 'cancel_job', workspace_id: state.workspace.id, id: running.job_id }) });
   assert.equal(cancel.status, 200); await delay(200); assert.equal((await call('get_job', { job_id: running.job_id })).status, 'cancelled');
   await call('close_shell', { shell_id: shell.shell_id }); assert.equal((await call('shell_read', { shell_id: shell.shell_id })).status, 'closed');
+  const adminShell = await call('open_shell');
+  const adminClose = await fetch(base+'/runtime/action', {method:'POST', headers:{...headers,'Content-Type':'application/json',Origin:base}, body:JSON.stringify({action:'close_shell',workspace_id:state.workspace.id,id:adminShell.shell_id})});
+  assert.equal(adminClose.status, 200); assert.equal((await adminClose.json()).status, 'closed');
   const lost = await call('start_job', { command: 'sleep 3; printf survived > survived.txt' });
   await stop(); await boot(); await connect();
   assert.equal((await call('get_job', { job_id: lost.job_id })).status, 'lost');

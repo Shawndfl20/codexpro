@@ -12,6 +12,10 @@ type Job = {
   job_id: string; workspace_id: string; root: string; command: string; cwd: string;
   pid: number | null; status: "running" | "completed" | "failed" | "cancelled" | "lost";
   started_at: string; finished_at: string | null; exit_code: number | null; owner: string;
+  cancel_requested?: boolean;
+};
+type ClosedShellSummary = Pick<Shell, "shell_id" | "workspace_id" | "cwd" | "pid" | "exit_code" | "stdout" | "stderr" | "truncated"> & {
+  status: "closed"; closed_at: string;
 };
 type Shell = {
   shell_id: string; workspace_id: string; cwd: string; pid: number | null;
@@ -26,6 +30,7 @@ export class Runtime {
   private readonly jobsDir = path.join(codexProHome(), "jobs");
   private readonly children = new Map<string, { child: ChildProcess; job: Job }>();
   private readonly shells = new Map<string, Shell>();
+  private readonly closedShells = new Map<string, ClosedShellSummary>();
   private readonly guard: PathGuard;
   constructor(private readonly config: CodexProConfig) { this.guard = new PathGuard(config); }
 
@@ -86,7 +91,7 @@ export class Runtime {
     });
     child.on("close", code => {
       this.children.delete(job.job_id);
-      if (job.status === "running") job.status = code === 0 ? "completed" : "failed";
+      if (job.status === "running") job.status = code === 0 ? "completed" : job.cancel_requested ? "cancelled" : "failed";
       job.finished_at = new Date().toISOString(); job.exit_code = code;
       this.save(job);
     });
@@ -106,15 +111,17 @@ export class Runtime {
     return { job_id: id, stream, text: redactSensitiveText(data.subarray(0, bytes).toString("utf8")),
       offset: start, next_offset: start + bytes, size, truncated: start > 0 || start + bytes < size };
   }
-  cancelJob(workspace: Workspace, id: string) {
+  cancelJob(workspace: Workspace, id: string, sessionId?: string) {
+    assertBashSession(this.config, sessionId);
     const job = this.getJob(workspace, id);
     if (job.status !== "running") return job;
     const owned = this.children.get(id);
     if (!owned) throw new CodexProError("Job process identity is unavailable; cannot cancel.");
-    terminateProcessTree(owned.child, "SIGKILL");
-    owned.job.status = "cancelled";
-    owned.job.finished_at = new Date().toISOString();
-    this.save(owned.job);
+    if (owned.child.exitCode === null && owned.child.signalCode === null && !owned.job.cancel_requested
+      && terminateProcessTree(owned.child, "SIGKILL")) {
+      owned.job.cancel_requested = true;
+      this.save(owned.job);
+    }
     return this.getJob(workspace, id);
   }
   openShell(workspace: Workspace, cwd = ".", sessionId?: string) {
@@ -139,7 +146,7 @@ export class Runtime {
         if (end >= 0) {
           append("stdout", shell.pending.slice(0, start));
           const result = shell.pending.slice(start + marker.length + 2, end);
-          shell.exit_code = Number(result); shell.status = "idle"; shell.marker = undefined;
+          shell.exit_code = Number(result); if (shell.status !== "closed") shell.status = "idle"; shell.marker = undefined;
           if (shell.exit_code === 0 && shell.pendingCwd !== undefined) shell.cwd = shell.pendingCwd;
           shell.pendingCwd = undefined;
           shell.pending = shell.pending.slice(end + 1);
@@ -151,18 +158,32 @@ export class Runtime {
     });
     child.stderr!.on("data", chunk => append("stderr", chunk.toString()));
     child.on("error", error => { append("stderr", error.message); shell.status = "closed"; });
-    child.on("close", () => { append("stdout", shell.pending); shell.pending = ""; shell.status = "closed"; });
+    child.once("close", code => {
+      append("stdout", shell.pending);
+      const stdout = Buffer.from(shell.stdout).subarray(-4000).toString("utf8");
+      const stderr = Buffer.from(shell.stderr).subarray(-4000).toString("utf8");
+      this.shells.delete(shell.shell_id);
+      this.closedShells.set(shell.shell_id, {
+        shell_id: shell.shell_id, workspace_id: shell.workspace_id, cwd: shell.cwd, pid: shell.pid,
+        status: "closed", exit_code: code, closed_at: new Date().toISOString(), stdout, stderr,
+        truncated: shell.truncated || stdout !== shell.stdout || stderr !== shell.stderr
+      });
+      if (this.closedShells.size > 32) this.closedShells.delete(this.closedShells.keys().next().value!);
+      shell.stdout = ""; shell.stderr = ""; shell.pending = "";
+      child.stdout!.removeAllListeners("data"); child.stderr!.removeAllListeners("data");
+      child.stdin!.removeAllListeners("error"); child.removeAllListeners("error");
+    });
     child.stdin!.on("error", error => { append("stderr", error.message); });
     return this.readShell(workspace, shell.shell_id);
   }
   private shell(workspace: Workspace, id: string) {
-    const shell = this.shells.get(id);
+    const shell = this.shells.get(id) ?? this.closedShells.get(id);
     if (!shell || shell.workspace_id !== workspace.id) throw new CodexProError("Unknown shell in this workspace; shells are not restored after server restart.");
     return shell;
   }
   execShell(workspace: Workspace, id: string, command: string, sessionId?: string) {
     const shell = this.shell(workspace, id);
-    if (shell.status !== "idle") throw new CodexProError("Shell is busy or closed. Read it or close it before executing another command.");
+    if (!("child" in shell) || shell.status !== "idle") throw new CodexProError("Shell is busy or closed. Read it or close it before executing another command.");
     // Directory changes are literal and resolved by the same guard as bash cwd.
     const cd = command.match(/^cd\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s;&|<>`$]+))\s*$/);
     if (cd) {
@@ -181,17 +202,21 @@ export class Runtime {
     return this.readShell(workspace, id);
   }
   readShell(workspace: Workspace, id: string) {
-    const { child, marker, pending, pendingCwd, ...result } = this.shell(workspace, id);
+    const shell = this.shell(workspace, id);
+    const { shell_id, workspace_id, cwd, pid, status, exit_code, stdout, stderr, truncated } = shell;
+    const result = { shell_id, workspace_id, cwd, pid, status, exit_code, stdout, stderr, truncated,
+      ...("closed_at" in shell ? { closed_at: shell.closed_at } : {}) };
     return { ...result, stdout: redactSensitiveText(result.stdout), stderr: redactSensitiveText(result.stderr) };
   }
   listShells(workspace: Workspace) {
-    return [...this.shells.values()].filter(s => s.workspace_id === workspace.id).map(s => {
+    return [...this.shells.values(), ...this.closedShells.values()].filter(s => s.workspace_id === workspace.id).map(s => {
       const { stdout, stderr, ...summary } = this.readShell(workspace, s.shell_id); return summary;
     });
   }
-  closeShell(workspace: Workspace, id: string) {
+  closeShell(workspace: Workspace, id: string, sessionId?: string) {
+    assertBashSession(this.config, sessionId);
     const shell = this.shell(workspace, id);
-    if (shell.status !== "closed") { terminateProcessTree(shell.child, "SIGKILL"); shell.status = "closed"; }
+    if ("child" in shell && shell.status !== "closed") { terminateProcessTree(shell.child, "SIGKILL"); shell.status = "closed"; }
     return this.readShell(workspace, id);
   }
   close() {

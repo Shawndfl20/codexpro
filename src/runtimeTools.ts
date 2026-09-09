@@ -39,11 +39,11 @@ export function registerRuntimeTools(runtime: Runtime, tasks: Tasks, workspaces:
   add("start_job", { ...workspace, ...session, command: z.string().min(1).max(30000), cwd: z.string().optional() }, a => runtime.startJob(ws(a), a.command, a.cwd, a.session_id));
   add("get_job", job, a => runtime.getJob(ws(a), a.job_id));
   add("job_logs", { ...job, stream: z.enum(["stdout", "stderr"]).optional(), offset: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(30000).optional() }, a => runtime.jobLogs(ws(a), a.job_id, a.stream, a.offset, a.limit));
-  add("cancel_job", job, a => runtime.cancelJob(ws(a), a.job_id));
+  add("cancel_job", { ...job, ...session }, a => runtime.cancelJob(ws(a), a.job_id, a.session_id));
   add("open_shell", { ...workspace, ...session, cwd: z.string().optional() }, a => runtime.openShell(ws(a), a.cwd, a.session_id));
   add("shell_exec", { ...shell, ...session, command: z.string().min(1).max(30000) }, a => runtime.execShell(ws(a), a.shell_id, a.command, a.session_id));
   add("shell_read", shell, a => runtime.readShell(ws(a), a.shell_id));
-  add("close_shell", shell, a => runtime.closeShell(ws(a), a.shell_id));
+  add("close_shell", { ...shell, ...session }, a => runtime.closeShell(ws(a), a.shell_id, a.session_id));
   add("create_task", { ...workspace, title: z.string().min(1).max(300), goal: z.string().min(1).max(16000), plan: z.string().max(60000).default("") }, a => tasks.create(ws(a), a.title, a.goal, a.plan));
   add("get_task", task, a => tasks.get(ws(a), a.task_id));
   const list = z.array(z.string().max(2000)).max(100).default([]);
