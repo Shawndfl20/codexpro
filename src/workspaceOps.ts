@@ -201,7 +201,7 @@ export async function readAiBridgeContext(
   config: CodexProConfig,
   guard: PathGuard,
   workspace: Workspace,
-  options: { createIfMissing?: boolean } = {}
+  options: { createIfMissing?: boolean; summary?: boolean } = {}
 ): Promise<{ text: string; files: string[] }> {
   if (options.createIfMissing) {
     await ensureAiBridge(config, guard, workspace);
@@ -225,12 +225,30 @@ export async function readAiBridgeContext(
   ];
   const chunks: string[] = [];
   const files: string[] = [];
+  if (options.summary) relFiles.push(`${config.contextDir}/handoff-run-state.json`);
   for (const rel of relFiles) {
+    if (options.summary && rel.endsWith(".patch")) { files.push(rel); continue; }
     try {
-      const read = await readTextFile(config, guard, workspace, rel, { maxBytes: 80_000 });
-      chunks.push(`--- ${rel} ---\n${read.text}`);
+      let text: string;
+      if (options.summary) {
+        const resolved = guard.resolve(workspace, rel);
+        const handle = await fsp.open(resolved.absPath, "r");
+        try {
+          const stat = await handle.stat();
+          const limit = Math.min(4000, config.maxReadBytes);
+          const buffer = Buffer.alloc(Math.min(stat.size, limit));
+          const offset = rel.endsWith(".jsonl") ? Math.max(0, stat.size - limit) : 0;
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+          text = buffer.subarray(0, bytesRead).toString("utf8");
+          if (stat.size > limit) text += `\n[excerpt; full file: ${rel}]`;
+        } finally { await handle.close(); }
+      } else {
+        text = (await readTextFile(config, guard, workspace, rel, { maxBytes: 80_000 })).text;
+      }
+      chunks.push(`--- ${rel} ---\n${text}`);
       files.push(rel);
     } catch (error) {
+      if (options.summary && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
       chunks.push(`--- ${rel} ---\n[unreadable: ${error instanceof Error ? error.message : String(error)}]`);
     }
   }

@@ -4,7 +4,7 @@ import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
 
-function runGit(workspace: Workspace, args: string[], maxOutputBytes: number): string {
+export function runGit(workspace: Workspace, args: string[], maxOutputBytes: number): string {
   const result = spawnSync("git", args, {
     cwd: workspace.root,
     encoding: "utf8",

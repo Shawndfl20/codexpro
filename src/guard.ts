@@ -59,10 +59,13 @@ function closestExistingParent(absPath: string): string {
 }
 
 export class WorkspaceManager {
-  private readonly workspaces = new Map<string, Workspace>();
   private selectedWorkspaceId?: string;
 
-  constructor(private readonly config: CodexProConfig) {}
+  constructor(private readonly config: CodexProConfig, private readonly workspaces = new Map<string, Workspace>()) {}
+
+  fork(): WorkspaceManager {
+    return new WorkspaceManager(this.config, this.workspaces);
+  }
 
   defaultWorkspace(): Workspace {
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);

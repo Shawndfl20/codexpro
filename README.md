@@ -181,3 +181,7 @@ npm run release:publish
 - [Stable URL guide](DOMAIN_SETUP.md)
 - [Changelog](CHANGELOG.md)
 - [Contributors](CONTRIBUTORS.md)
+
+## Runtime and recovery
+
+Background jobs, persistent Bash, task checkpoints and the local Runtime Console are available in standard/full tool mode. See [Runtime and recovery](docs/runtime.md) for tools, examples, persistence and security boundaries.

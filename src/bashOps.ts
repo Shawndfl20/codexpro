@@ -129,7 +129,7 @@ function isAllowedPackageScript(command: string): boolean {
   return packageScriptPattern.test(command);
 }
 
-function assertSafeCommand(config: CodexProConfig, command: string): void {
+export function assertSafeCommand(config: CodexProConfig, command: string): void {
   if (config.bashMode === "off") {
     throw new CodexProError("bash tool is disabled. Start with CODEXPRO_BASH_MODE=safe or CODEXPRO_BASH_MODE=full to enable it.");
   }
@@ -154,7 +154,7 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
   }
 }
 
-function assertBashSession(config: CodexProConfig, sessionId?: string): string | undefined {
+export function assertBashSession(config: CodexProConfig, sessionId?: string): string | undefined {
   const requested = sessionId?.trim();
   if (!config.bashSessionId) {
     if (config.requireBashSession) {
@@ -235,7 +235,7 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   return makeRestrictedBashEnv(config);
 }
 
-function bashExecutable(): string {
+export function bashExecutable(): string {
   return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
 }
 
@@ -246,21 +246,21 @@ function trimOutput(value: string, maxBytes: number): { value: string; truncated
   return { value: `${sliced}\n...[output truncated to ${maxBytes} bytes]`, truncated: true };
 }
 
-function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
+export function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): boolean {
+  if (!child.pid) return false;
   if (process.platform === "win32") {
     // Windows does not provide Unix-style cooperative signals to process trees.
     // Force the full tree while the parent PID still identifies its descendants;
     // otherwise the shell can exit first and orphan an output-heavy grandchild.
     const args = ["/pid", String(child.pid), "/t", "/f"];
     const result = spawnSync("taskkill", args, { stdio: "ignore", windowsHide: true });
-    if (result.status !== 0) child.kill(signal);
-    return;
+    return result.status === 0 || child.kill(signal);
   }
   try {
     process.kill(-child.pid, signal);
+    return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill(signal);
+    return (error as NodeJS.ErrnoException).code !== "ESRCH" && child.kill(signal);
   }
 }
 

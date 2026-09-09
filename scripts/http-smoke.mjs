@@ -681,9 +681,12 @@ try {
       const secondList = await callTool(secondClient, 'list_workspaces');
       if (
         secondList.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id
-        || secondList.structuredContent.workspaces.some((workspace) => workspace.root === alternateRoot)
       ) {
         throw new Error(`HTTP workspace selection leaked between MCP sessions: ${JSON.stringify(secondList.structuredContent)}`);
+      }
+      const recovered = await callTool(secondClient, 'read', { workspace_id: alternate.structuredContent.workspace_id, path: 'selected.txt' });
+      if (!recovered.content.some(part => part.type === 'text' && part.text.includes('http alternate workspace'))) {
+        throw new Error('Shared workspace registry did not recover an explicit workspace id in the new session');
       }
     });
 
