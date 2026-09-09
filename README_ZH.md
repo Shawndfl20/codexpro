@@ -174,3 +174,7 @@ codexpro --version
 - [稳定 URL 指南](DOMAIN_SETUP.md)
 - [Changelog](CHANGELOG.md)
 - [Contributors](CONTRIBUTORS.md)
+
+## Runtime 与任务恢复
+
+standard/full 工具模式支持后台 Job、持续 Bash、任务检查点与本机 Runtime Console。工具、使用示例、持久化与权限边界见 [Runtime 使用说明](docs/runtime.md)。

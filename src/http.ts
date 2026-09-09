@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { Runtime } from "./runtimeOps.js";
+import { WorkspaceManager } from "./guard.js";
+import { registerRuntimeConsole } from "./runtimeConsole.js";
 import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
@@ -1445,6 +1448,11 @@ async function main(): Promise<void> {
   }
 
   const config = loadConfig();
+  const workspaces = new WorkspaceManager(config);
+  const runtime = new Runtime(config);
+  process.once("exit", () => runtime.close());
+  process.once("SIGTERM", () => process.exit(0));
+  process.once("SIGINT", () => process.exit(0));
   if (config.requireHttpToken && !config.authToken) {
     throw new Error(
       "CODEXPRO_HTTP_TOKEN is required for this HTTP binding. " +
@@ -1554,6 +1562,8 @@ async function main(): Promise<void> {
     }
     res.status(401).send("Unauthorized");
   });
+
+  registerRuntimeConsole(app, config, workspaces, runtime);
 
   type TransportRecord = {
     transport: StreamableHTTPServerTransport;
@@ -1699,7 +1709,7 @@ async function main(): Promise<void> {
           if (closedSessionId) transports.delete(closedSessionId);
         };
 
-        const server = createCodexProServer(config);
+        const server = createCodexProServer(config, workspaces.fork(), runtime);
         await server.connect(transport);
       } else {
         sendSessionError(res, sessionId);

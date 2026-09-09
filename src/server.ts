@@ -1,3 +1,6 @@
+import { Runtime } from "./runtimeOps.js";
+import { Tasks } from "./taskOps.js";
+import { registerRuntimeTools, RUNTIME_TOOLS, EXECUTION_TOOLS, TASK_WRITE_TOOLS } from "./runtimeTools.js";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -331,6 +334,7 @@ const MINIMAL_TOOL_NAMES = [
 ] as const;
 
 const STANDARD_TOOL_NAMES = [
+  ...RUNTIME_TOOLS,
   ...MINIMAL_TOOL_NAMES,
   "inspect_workspace",
   "tree",
@@ -344,6 +348,7 @@ const STANDARD_TOOL_NAMES = [
 ] as const;
 
 const FULL_TOOL_NAMES = [
+  ...RUNTIME_TOOLS,
   SUPERTOOL_NAME,
   "server_config",
   "codexpro_self_test",
@@ -375,6 +380,7 @@ const FULL_TOOL_NAMES = [
 ] as const;
 
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
+  ...EXECUTION_TOOLS, ...TASK_WRITE_TOOLS, "cancel_job", "close_shell",
   SUPERTOOL_NAME,
   "codexpro_self_test",
   "write",
@@ -425,7 +431,7 @@ function toolNamesForMode(config: CodexProConfig): string[] {
   for (const name of codexSessionToolNames(config)) {
     if (!names.includes(name)) names.push(name);
   }
-  return names;
+  return names.filter(name => runtimeToolAllowed(config, name));
 }
 
 const MINIMAL_TOOLS = new Set<string>(MINIMAL_TOOL_NAMES);
@@ -443,7 +449,14 @@ function registeredToolNames(server: McpServer): string[] {
   return [...(registeredToolNamesByServer.get(server as object) ?? [])];
 }
 
+function runtimeToolAllowed(config: CodexProConfig, name: string): boolean {
+  if (EXECUTION_TOOLS.includes(name) && config.bashMode === "off") return false;
+  if (TASK_WRITE_TOOLS.includes(name) && config.writeMode === "off") return false;
+  return true;
+}
+
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
+  if (!runtimeToolAllowed(config, name)) return false;
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if (name === "bash" && config.bashMode === "off") return false;
   if ((name === "write" || name === "edit" || name === "apply_patch" || name === "import_file") && config.writeMode !== "workspace") return false;
@@ -926,13 +939,19 @@ const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, des
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
-export function createCodexProServer(config: CodexProConfig): McpServer {
-  const workspaces = new WorkspaceManager(config);
+export function createCodexProServer(config: CodexProConfig, workspaces = new WorkspaceManager(config), runtime = new Runtime(config)): McpServer {
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.30.0" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
+  const tasks = new Tasks(config, runtime);
+  registerRuntimeTools(runtime, tasks, workspaces, (name, options, handler) => {
+    registerCodexTool(config, server, name, options, async args => {
+      const result = await handler(args) as Record<string, unknown>;
+      return textResult(JSON.stringify(result, null, 2), result);
+    });
+  });
 
   registerCodexTool(
     config,
